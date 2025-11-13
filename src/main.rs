@@ -804,7 +804,6 @@ impl Projectile {
 
             if self.pos.x < 0.0
                 || self.pos.x > map.total_width()
-                || self.pos.y < 0.0
                 || self.pos.y > map.total_height()
             {
                 self.active = false;
