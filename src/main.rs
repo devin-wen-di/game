@@ -7,7 +7,7 @@ const COLS: usize = 768;
 const ROWS: usize = 512;
 const PLAYER_WIDTH: f32 = TILE_SIZE * 4.0;
 const PLAYER_HEIGHT: f32 = TILE_SIZE * 8.0;
-const MOVE_SPEED: f32 = 120.0;
+const MOVE_SPEED: f32 = 60.0;
 const SMOOTH_FACTOR: f32 = 12.0;
 const GRAVITY: f32 = 400.0;
 const MAX_UP_STEP: f32 = TILE_SIZE * 3.0;
@@ -21,12 +21,17 @@ const POWER_MAX: f32 = 1000.0;
 const POWER_RATE: f32 = 240.0;
 const PROJECTILE_RADIUS: f32 = 6.0;
 const EXPLOSION_RADIUS: f32 = 50.0;
+const EXPLOSION_DAMAGE: f32 = 35.0;
 const CHARGE_BAR_WIDTH: f32 = 220.0;
 const CHARGE_BAR_HEIGHT: f32 = 12.0;
 const CHARGE_BAR_MARGIN: f32 = 16.0;
 const AIRPACK_BTN_WIDTH: f32 = 140.0;
 const AIRPACK_BTN_HEIGHT: f32 = 40.0;
 const AIRPACK_BTN_MARGIN: f32 = 16.0;
+const TURN_DURATION: f32 = 20.0;
+const MAX_HEALTH: f32 = 100.0;
+const HEALTH_BAR_WIDTH: f32 = PLAYER_WIDTH;
+const HEALTH_BAR_HEIGHT: f32 = 6.0;
 
 fn window_conf() -> Conf {
     Conf {
@@ -210,43 +215,60 @@ struct Player {
     is_charging: bool,
     charge_power: f32,
     is_airpack_flight: bool,
+    health: f32,
+    color: Color,
+    id: usize,
+    spawn_hint: f32,
+    name: &'static str,
 }
 
 impl Player {
-    fn spawn(map: &Map) -> Self {
+    fn spawn_with_hint(map: &Map, id: usize, color: Color, preferred_x: f32, name: &'static str) -> Self {
         let min_x = TILE_SIZE * 0.5;
         let max_x = map.max_x();
-        let mut spawn_x = (min_x + max_x) * 0.5;
-        for _ in 0..128 {
-            let candidate = gen_range(min_x, max_x);
-            let left = candidate - PLAYER_WIDTH * 0.5;
-            let right = candidate + PLAYER_WIDTH * 0.5;
+        let mut spawn_x = preferred_x.clamp(min_x, max_x);
+        let mut found = false;
+        for _ in 0..256 {
+            let left = spawn_x - PLAYER_WIDTH * 0.5;
+            let right = spawn_x + PLAYER_WIDTH * 0.5;
             if map.find_floor_below(left, right, -PLAYER_HEIGHT).is_some() {
-                spawn_x = candidate;
+                found = true;
                 break;
             }
+            spawn_x = gen_range(min_x, max_x);
+        }
+        if !found {
+            spawn_x = (min_x + max_x) * 0.5;
         }
 
         Self {
             pos: vec2(spawn_x, PLAYER_HEIGHT),
             velocity: vec2(0.0, 0.0),
             on_ground: false,
-            facing: 1.0,
+            facing: if id % 2 == 0 { 1.0 } else { -1.0 },
             launch_angle: MIN_LAUNCH_ANGLE,
             is_charging: false,
             charge_power: 0.0,
             is_airpack_flight: false,
+            health: MAX_HEALTH,
+            color,
+            id,
+            spawn_hint: preferred_x,
+            name,
         }
     }
 
     fn reset(&mut self, map: &Map) {
-        *self = Player::spawn(map);
+        let snapshot = Player::spawn_with_hint(map, self.id, self.color, self.spawn_hint, self.name);
+        let preserved_health = self.health;
+        *self = snapshot;
+        self.health = preserved_health;
     }
 
-    fn update(&mut self, map: &Map, dt: f32) {
+    fn update(&mut self, map: &Map, dt: f32, controls_enabled: bool) {
         if self.is_airpack_flight {
             // preserve launch velocity while airborne due to airpack skill
-        } else if !self.is_charging {
+        } else if controls_enabled && !self.is_charging {
             let mut input: f32 = 0.0;
             if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
                 input -= 1.0;
@@ -307,15 +329,18 @@ impl Player {
             self.velocity.x = 0.0;
         }
 
-        if is_key_down(KeyCode::Up) {
+        if controls_enabled && is_key_down(KeyCode::Up) {
             self.launch_angle = (self.launch_angle + 1.2 * dt).min(MAX_LAUNCH_ANGLE);
         }
-        if is_key_down(KeyCode::Down) {
+        if controls_enabled && is_key_down(KeyCode::Down) {
             self.launch_angle = (self.launch_angle - 1.2 * dt).max(MIN_LAUNCH_ANGLE);
         }
 
-        if is_key_pressed(KeyCode::Space) {
+        if controls_enabled && is_key_pressed(KeyCode::Space) {
             self.is_charging = true;
+            self.charge_power = 0.0;
+        } else if !controls_enabled {
+            self.is_charging = false;
             self.charge_power = 0.0;
         }
         if self.is_charging {
@@ -380,15 +405,46 @@ impl Player {
         }
     }
 
-    fn draw(&self) {
+    fn draw(&self, active: bool) {
         let x = self.pos.x - PLAYER_WIDTH * 0.5;
         let y = self.pos.y - PLAYER_HEIGHT;
-        draw_rectangle(x, y, PLAYER_WIDTH, PLAYER_HEIGHT, YELLOW);
+        let body_color = if active {
+            self.color
+        } else {
+            Color::new(
+                self.color.r * 0.7,
+                self.color.g * 0.7,
+                self.color.b * 0.7,
+                self.color.a,
+            )
+        };
+        draw_rectangle(x, y, PLAYER_WIDTH, PLAYER_HEIGHT, body_color);
+        if active {
+            draw_rectangle_lines(x - 2.0, y - 2.0, PLAYER_WIDTH + 4.0, PLAYER_HEIGHT + 4.0, 2.0, WHITE);
+        }
 
         let aim_origin = vec2(self.pos.x, self.pos.y - PLAYER_HEIGHT * 0.5);
         let direction = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
         let aim_end = aim_origin + direction.normalize() * 40.0;
         draw_line(aim_origin.x, aim_origin.y, aim_end.x, aim_end.y, 2.0, WHITE);
+
+        let bar_x = self.pos.x - HEALTH_BAR_WIDTH * 0.5;
+        let bar_y = y - HEALTH_BAR_HEIGHT - 6.0;
+        draw_rectangle(bar_x, bar_y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT, DARKGRAY);
+        let health_ratio = (self.health / MAX_HEALTH).clamp(0.0, 1.0);
+        if health_ratio > 0.0 {
+            draw_rectangle(bar_x, bar_y, HEALTH_BAR_WIDTH * health_ratio, HEALTH_BAR_HEIGHT, GREEN);
+        }
+        draw_rectangle_lines(bar_x, bar_y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT, 1.0, WHITE);
+
+        let name_dims = measure_text(self.name, None, 16, 1.0);
+        draw_text(
+            self.name,
+            self.pos.x - name_dims.width * 0.5,
+            bar_y - 4.0,
+            16.0,
+            WHITE,
+        );
     }
 
     fn launch_self(&mut self, power: f32) {
@@ -403,21 +459,36 @@ impl Player {
         self.velocity = dir * power;
         self.pos += dir * 2.0;
     }
+
+    fn apply_damage(&mut self, amount: f32) {
+        self.health = (self.health - amount).max(0.0);
+    }
+
+    fn is_alive(&self) -> bool {
+        self.health > 0.0
+    }
+
+    fn cancel_charge(&mut self) {
+        self.is_charging = false;
+        self.charge_power = 0.0;
+    }
 }
 
 struct Projectile {
     pos: Vec2,
     velocity: Vec2,
     active: bool,
+    owner_id: usize,
 }
 
 impl Projectile {
-    fn launch(origin: Vec2, facing: f32, angle: f32, power: f32) -> Self {
+    fn launch(origin: Vec2, facing: f32, angle: f32, power: f32, owner_id: usize) -> Self {
         let dir = vec2(facing * angle.cos(), -angle.sin()).normalize();
         Self {
             pos: origin,
             velocity: dir * power,
             active: true,
+            owner_id,
         }
     }
 
@@ -463,61 +534,102 @@ impl Projectile {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut map = Map::from_csv(MAP_PATH);
-    let mut player = Player::spawn(&map);
+    let total_width = map.total_width();
+    let mut players = vec![
+        Player::spawn_with_hint(&map, 0, GOLD, total_width * 0.25, "玩家一"),
+        Player::spawn_with_hint(&map, 1, SKYBLUE, total_width * 0.75, "玩家二"),
+    ];
+    let mut active_index: usize = 0;
+    let mut turn_timer = TURN_DURATION;
     let mut projectile = Projectile {
         pos: Vec2::ZERO,
         velocity: Vec2::ZERO,
         active: false,
+        owner_id: usize::MAX,
     };
     let mut airpack_mode = false;
 
     loop {
         let dt = get_frame_time();
+        if !ensure_active_player_alive(&mut active_index, &players) {
+            draw_game_over_scene(&map, &players);
+            next_frame().await;
+            continue;
+        }
+
+        let controls_enabled = players[active_index].is_alive();
         let button_rect = airpack_button_rect();
-        if is_mouse_button_pressed(MouseButton::Left) {
+        if controls_enabled && is_mouse_button_pressed(MouseButton::Left) {
             let (mx, my) = mouse_position();
             if button_rect.contains(vec2(mx, my)) {
                 airpack_mode = !airpack_mode;
             }
+        } else if !controls_enabled {
+            airpack_mode = false;
         }
 
-        player.update(&map, dt);
+        for idx in 0..players.len() {
+            let enable = idx == active_index && controls_enabled;
+            players[idx].update(&map, dt, enable);
+        }
 
-        if player.is_charging && is_key_released(KeyCode::Space) {
-            if player.charge_power > 0.0 {
+        if controls_enabled && players[active_index].is_charging && is_key_released(KeyCode::Space) {
+            let charge = players[active_index].charge_power;
+            if charge > 0.0 {
                 if airpack_mode {
-                    player.launch_self(player.charge_power);
+                    players[active_index].launch_self(charge);
                     airpack_mode = false;
                 } else {
-                    let origin = vec2(player.pos.x, player.pos.y - PLAYER_HEIGHT * 0.5);
-                    projectile = Projectile::launch(origin, player.facing, player.launch_angle, player.charge_power);
+                    let origin = vec2(players[active_index].pos.x, players[active_index].pos.y - PLAYER_HEIGHT * 0.5);
+                    projectile = Projectile::launch(
+                        origin,
+                        players[active_index].facing,
+                        players[active_index].launch_angle,
+                        charge,
+                        active_index,
+                    );
                 }
-                player.is_charging = false;
-                player.charge_power = 0.0;
-            } else {
-                player.is_charging = false;
             }
+            players[active_index].cancel_charge();
         }
 
         if projectile.active {
             if let Some(hit_pos) = projectile.update(&map, dt) {
                 map.carve_circle(hit_pos, EXPLOSION_RADIUS);
+                apply_explosion_damage(hit_pos, &mut players);
+            }
+        }
+
+        if !players[active_index].is_alive() {
+            advance_turn(&mut active_index, &mut turn_timer, &mut airpack_mode, &mut players);
+        } else {
+            turn_timer -= dt;
+            if turn_timer <= 0.0 {
+                advance_turn(&mut active_index, &mut turn_timer, &mut airpack_mode, &mut players);
             }
         }
 
         clear_background(BLACK);
         map.draw();
-        player.draw();
+        for idx in 0..players.len() {
+            let is_active = idx == active_index && players[idx].is_alive();
+            players[idx].draw(is_active);
+        }
         projectile.draw();
-        draw_charge_bar(&player);
-        draw_airpack_button(airpack_mode);
+        let active_alive_now = players[active_index].is_alive();
+        let charge_player = players.get(active_index).filter(|p| p.is_alive());
+        draw_charge_bar(charge_player);
+        draw_airpack_button(airpack_mode, active_alive_now);
+        draw_turn_timer(turn_timer, players.get(active_index).filter(|p| p.is_alive()).map(|p| p.name));
 
         next_frame().await;
     }
 }
 
-fn draw_charge_bar(player: &Player) {
-    let ratio = (player.charge_power / POWER_MAX).clamp(0.0, 1.0);
+fn draw_charge_bar(player: Option<&Player>) {
+    let ratio = player
+        .map(|p| (p.charge_power / POWER_MAX).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
     let x = (screen_width() - CHARGE_BAR_WIDTH) * 0.5;
     let y = CHARGE_BAR_MARGIN;
     draw_rectangle(x, y, CHARGE_BAR_WIDTH, CHARGE_BAR_HEIGHT, DARKGRAY);
@@ -531,6 +643,28 @@ fn draw_charge_bar(player: &Player) {
         );
     }
     draw_rectangle_lines(x, y, CHARGE_BAR_WIDTH, CHARGE_BAR_HEIGHT, 2.0, WHITE);
+
+    if let Some(p) = player {
+        let label = format!("{} 蓄力", p.name);
+        let dims = measure_text(&label, None, 18, 1.0);
+        draw_text(
+            &label,
+            x + (CHARGE_BAR_WIDTH - dims.width) * 0.5,
+            y - 6.0,
+            18.0,
+            WHITE,
+        );
+    } else {
+        let label = "等待下一位";
+        let dims = measure_text(label, None, 18, 1.0);
+        draw_text(
+            label,
+            x + (CHARGE_BAR_WIDTH - dims.width) * 0.5,
+            y - 6.0,
+            18.0,
+            GRAY,
+        );
+    }
 }
 
 fn airpack_button_rect() -> Rect {
@@ -539,16 +673,115 @@ fn airpack_button_rect() -> Rect {
     Rect::new(x, y, AIRPACK_BTN_WIDTH, AIRPACK_BTN_HEIGHT)
 }
 
-fn draw_airpack_button(active: bool) {
+fn draw_airpack_button(toggled: bool, enabled: bool) {
     let rect = airpack_button_rect();
-    let base_color = if active { ORANGE } else { DARKGRAY };
+    let base_color = if !enabled {
+        GRAY
+    } else if toggled {
+        ORANGE
+    } else {
+        DARKGRAY
+    };
     draw_rectangle(rect.x, rect.y, rect.w, rect.h, base_color);
     draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 2.0, WHITE);
 
-    let label = "jet pack";
-    let text_size = 26;
+    let label = "空气背包";
+    let text_size = 24;
     let text_width = measure_text(label, None, text_size, 1.0).width;
     let text_x = rect.x + (rect.w - text_width) * 0.5;
-    let text_y = rect.y + rect.h * 0.6;
-    draw_text(label, text_x, text_y, text_size as f32, WHITE);
+    let text_y = rect.y + rect.h * 0.65;
+    let text_color = if enabled { WHITE } else { LIGHTGRAY };
+    draw_text(label, text_x, text_y, text_size as f32, text_color);
+}
+
+fn draw_turn_timer(time_remaining: f32, active_name: Option<&str>) {
+    let seconds = time_remaining.max(0.0).ceil();
+    let label = if let Some(name) = active_name {
+        format!("{} 回合剩余 {:.0}s", name, seconds)
+    } else {
+        "等待玩家".to_string()
+    };
+    let dims = measure_text(&label, None, 24, 1.0);
+    let x = screen_width() - dims.width - 24.0;
+    let y = CHARGE_BAR_MARGIN + CHARGE_BAR_HEIGHT + 12.0;
+    draw_text(&label, x, y, 24.0, WHITE);
+}
+
+fn apply_explosion_damage(center: Vec2, players: &mut [Player]) {
+    for player in players.iter_mut() {
+        if !player.is_alive() {
+            continue;
+        }
+        let torso_center = vec2(player.pos.x, player.pos.y - PLAYER_HEIGHT * 0.5);
+        let distance = torso_center.distance(center);
+        let effective_radius = EXPLOSION_RADIUS + PLAYER_WIDTH * 0.5;
+        if distance <= effective_radius {
+            let falloff = 1.0 - (distance / effective_radius).clamp(0.0, 1.0);
+            let damage = EXPLOSION_DAMAGE * falloff;
+            if damage > 0.0 {
+                player.apply_damage(damage);
+            }
+        }
+    }
+}
+
+fn ensure_active_player_alive(active_index: &mut usize, players: &[Player]) -> bool {
+    if players.iter().all(|p| !p.is_alive()) {
+        return false;
+    }
+    if players[*active_index].is_alive() {
+        return true;
+    }
+    let len = players.len();
+    for step in 1..=len {
+        let idx = (*active_index + step) % len;
+        if players[idx].is_alive() {
+            *active_index = idx;
+            return true;
+        }
+    }
+    false
+}
+
+fn advance_turn(
+    active_index: &mut usize,
+    turn_timer: &mut f32,
+    airpack_mode: &mut bool,
+    players: &mut [Player],
+) {
+    if let Some(active) = players.get_mut(*active_index) {
+        active.cancel_charge();
+    }
+    *airpack_mode = false;
+    *turn_timer = TURN_DURATION;
+
+    if players.iter().all(|p| !p.is_alive()) {
+        return;
+    }
+
+    let len = players.len();
+    for step in 1..=len {
+        let idx = (*active_index + step) % len;
+        if players[idx].is_alive() {
+            *active_index = idx;
+            break;
+        }
+    }
+}
+
+fn draw_game_over_scene(map: &Map, players: &[Player]) {
+    clear_background(BLACK);
+    map.draw();
+    for player in players {
+        player.draw(false);
+    }
+    let message = "游戏结束";
+    let dims = measure_text(message, None, 36, 1.0);
+    draw_text(
+        message,
+        (screen_width() - dims.width) * 0.5,
+        screen_height() * 0.5,
+        36.0,
+        WHITE,
+    );
 }
