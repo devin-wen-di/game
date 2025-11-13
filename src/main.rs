@@ -1,5 +1,6 @@
 use macroquad::prelude::*;
 use macroquad::rand::gen_range;
+use std::f32::consts::PI;
 
 const MAP_PATH: &str = "src/map.csv";
 const TILE_SIZE: f32 = 2.0;
@@ -458,6 +459,7 @@ struct Player {
     spawn_hint: f32,
     name: &'static str,
     skills: SkillLoadout,
+    surface_angle: f32,
 }
 
 impl Player {
@@ -494,6 +496,7 @@ impl Player {
             spawn_hint: preferred_x,
             name,
             skills: SkillLoadout::new(),
+            surface_angle: 0.0,
         }
     }
 
@@ -584,11 +587,13 @@ impl Player {
         }
 
         if controls_enabled && is_key_down(KeyCode::Up) {
-            self.launch_angle = (self.launch_angle + 1.2 * dt).min(MAX_LAUNCH_ANGLE);
+            self.launch_angle += 1.2 * dt;
         }
         if controls_enabled && is_key_down(KeyCode::Down) {
-            self.launch_angle = (self.launch_angle - 1.2 * dt).max(MIN_LAUNCH_ANGLE);
+            self.launch_angle -= 1.2 * dt;
         }
+        let (min_angle, max_angle) = self.relative_launch_angle_bounds();
+        self.launch_angle = self.launch_angle.clamp(min_angle, max_angle);
 
         if controls_enabled && is_key_pressed(KeyCode::Space) {
             self.is_charging = true;
@@ -646,7 +651,7 @@ impl Player {
                     self.is_airpack_flight = false;
                 }
             } else if self.pos.y - PLAYER_HEIGHT > map.total_height() + PLAYER_HEIGHT {
-                self.reset(map);
+                self.respawn_top_dead(map);
                 return;
             }
         }
@@ -657,16 +662,20 @@ impl Player {
                 self.velocity.y = 0.0;
             }
         }
+
+        if self.on_ground {
+            self.refresh_surface_angle(map);
+        }
     }
 
     fn draw(&self, active: bool) {
-        let (body_width, body_height, body_top) = if self.is_alive() {
-            (PLAYER_WIDTH, PLAYER_HEIGHT, self.pos.y - PLAYER_HEIGHT)
+        let alive = self.is_alive();
+        let body_top = if alive {
+            self.pos.y - PLAYER_HEIGHT
         } else {
-            (PLAYER_HEIGHT, PLAYER_WIDTH, self.pos.y - PLAYER_WIDTH)
+            self.pos.y - PLAYER_WIDTH
         };
-        let x = self.pos.x - body_width * 0.5;
-        let body_color = if self.is_alive() {
+        let body_color = if alive {
             if active {
                 self.color
             } else {
@@ -681,16 +690,38 @@ impl Player {
             DARKGRAY
         };
 
-        draw_rectangle(x, body_top, body_width, body_height, body_color);
-        if active && self.is_alive() {
-            draw_rectangle_lines(x - 2.0, body_top - 2.0, body_width + 4.0, body_height + 4.0, 2.0, WHITE);
-        }
+        if alive {
+            let foot = vec2(self.pos.x, self.pos.y);
+            let half_width = PLAYER_WIDTH * 0.5;
+            let height = PLAYER_HEIGHT;
+            let tangent_angle = self.surface_angle;
+            let tangent_dir = vec2(tangent_angle.cos(), -tangent_angle.sin());
+            let normal_dir = vec2(tangent_dir.y, -tangent_dir.x);
 
-        if self.is_alive() {
-            let aim_origin = vec2(self.pos.x, self.pos.y - PLAYER_HEIGHT * 0.5);
-            let direction = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
-            let aim_end = aim_origin + direction.normalize() * 40.0;
+            let bottom_left = foot - tangent_dir * half_width;
+            let bottom_right = foot + tangent_dir * half_width;
+            let top_left = bottom_left + normal_dir * height;
+            let top_right = bottom_right + normal_dir * height;
+
+            draw_triangle(bottom_left, top_left, top_right, body_color);
+            draw_triangle(bottom_left, top_right, bottom_right, body_color);
+
+            if active {
+                draw_line(bottom_left.x, bottom_left.y, bottom_right.x, bottom_right.y, 2.0, WHITE);
+                draw_line(bottom_right.x, bottom_right.y, top_right.x, top_right.y, 2.0, WHITE);
+                draw_line(top_right.x, top_right.y, top_left.x, top_left.y, 2.0, WHITE);
+                draw_line(top_left.x, top_left.y, bottom_left.x, bottom_left.y, 2.0, WHITE);
+            }
+
+            let aim_origin = foot + normal_dir * (-PLAYER_HEIGHT * 0.5);
+            let aim_dir = self.shot_direction();
+            let aim_end = aim_origin + aim_dir * 40.0;
             draw_line(aim_origin.x, aim_origin.y, aim_end.x, aim_end.y, 2.0, WHITE);
+        } else {
+            let body_width = PLAYER_HEIGHT;
+            let body_height = PLAYER_WIDTH;
+            let x = self.pos.x - body_width * 0.5;
+            draw_rectangle(x, body_top, body_width, body_height, body_color);
         }
 
         let bar_x = self.pos.x - HEALTH_BAR_WIDTH * 0.5;
@@ -738,10 +769,8 @@ impl Player {
     }
 
     fn launch_self(&mut self, power: f32) {
-        let mut dir = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
-        if dir.length_squared() > f32::EPSILON {
-            dir = dir.normalize();
-        } else {
+        let mut dir = self.shot_direction();
+        if dir.length_squared() <= f32::EPSILON {
             dir = vec2(self.facing, 0.0);
         }
         self.is_airpack_flight = true;
@@ -769,7 +798,48 @@ impl Player {
         self.charge_power = 0.0;
     }
 
-    fn projectile_angle_bounds(&self) -> (f32, f32) {
+    fn respawn_top_dead(&mut self, map: &Map) {
+        let min_x = TILE_SIZE * 0.5;
+        let max_x = map.max_x();
+        let spawn_x = gen_range(min_x, max_x);
+        self.pos = vec2(spawn_x, PLAYER_HEIGHT);
+        self.velocity = Vec2::ZERO;
+        self.on_ground = false;
+        self.is_airpack_flight = false;
+        self.is_charging = false;
+        self.health = 0.0;
+        self.surface_angle = 0.0;
+        self.launch_angle = MIN_LAUNCH_ANGLE;
+    }
+
+    fn refresh_surface_angle(&mut self, map: &Map) {
+        let half_width = PLAYER_WIDTH * 0.5;
+        let left_x = (self.pos.x - half_width).clamp(0.0, map.total_width());
+        let right_x = (self.pos.x + half_width).clamp(0.0, map.total_width());
+        let sample_width = (right_x - left_x).max(TILE_SIZE);
+        let probe_top = self.pos.y - PLAYER_HEIGHT;
+
+        let span = TILE_SIZE * 0.25;
+        let left_end = (left_x + span).min(map.total_width());
+        let right_start = if right_x >= span {
+            right_x - span
+        } else {
+            0.0
+        };
+
+        let left_floor = map
+            .find_floor_below(left_x, left_end.max(left_x), probe_top)
+            .unwrap_or(self.pos.y);
+        let right_floor = map
+            .find_floor_below(right_start.min(right_x), right_x, probe_top)
+            .unwrap_or(self.pos.y);
+
+        let dy = right_floor - left_floor;
+        let angle = (-dy).atan2(sample_width);
+        self.surface_angle = angle.clamp(-PI / 4.0, PI / 4.0);
+    }
+
+    fn relative_launch_angle_bounds(&self) -> (f32, f32) {
         if self.skills.scatter_selected() {
             (
                 (MIN_LAUNCH_ANGLE - SCATTER_OFFSET_RAD).max(0.0),
@@ -778,6 +848,29 @@ impl Player {
         } else {
             (MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE)
         }
+    }
+
+    fn to_world_launch_angle(&self, relative_angle: f32, facing: f32) -> f32 {
+        let mut world = if facing >= 0.0 {
+            relative_angle + self.surface_angle
+        } else {
+            relative_angle - self.surface_angle
+        };
+        world = world.clamp(0.01, PI - 0.01);
+        world
+    }
+
+    fn shot_direction(&self) -> Vec2 {
+        let (min_angle, max_angle) = self.relative_launch_angle_bounds();
+        let clamped = self.launch_angle.clamp(min_angle, max_angle);
+        let world_angle = self.to_world_launch_angle(clamped, self.facing);
+        let mut dir = vec2(self.facing * world_angle.cos(), -world_angle.sin());
+        if dir.length_squared() > f32::EPSILON {
+            dir = dir.normalize();
+        } else {
+            dir = vec2(self.facing, 0.0);
+        }
+        dir
     }
 }
 
@@ -931,17 +1024,17 @@ async fn main() {
         }
 
         for task in ready_tasks {
-            let (min_angle, max_angle) = players
-                .get(task.owner_idx)
-                .map(Player::projectile_angle_bounds)
-                .unwrap_or((MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE));
+            let Some(player) = players.get(task.owner_idx) else {
+                continue;
+            };
+            let (min_angle, max_angle) = player.relative_launch_angle_bounds();
             for offset in &task.angle_offsets {
-                let mut angle = task.base_angle + *offset;
-                angle = angle.clamp(min_angle, max_angle);
+                let relative = (task.base_angle + *offset).clamp(min_angle, max_angle);
+                let world_angle = player.to_world_launch_angle(relative, task.facing);
                 projectiles.push(Projectile::launch(
                     task.origin,
                     task.facing,
-                    angle,
+                    world_angle,
                     task.power,
                     task.owner_idx,
                     task.damage,
