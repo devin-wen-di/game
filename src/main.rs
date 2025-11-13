@@ -32,6 +32,243 @@ const TURN_DURATION: f32 = 20.0;
 const MAX_HEALTH: f32 = 100.0;
 const HEALTH_BAR_WIDTH: f32 = PLAYER_WIDTH;
 const HEALTH_BAR_HEIGHT: f32 = 6.0;
+const SKILL_BUTTON_GAP: f32 = 12.0;
+const SCATTER_OFFSET_RAD: f32 = 5.0_f32.to_radians();
+const TRIPLE_DELAY: f32 = 0.5;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum SkillKind {
+    Jetpack,
+    Heavy,
+    Triple,
+    Scatter,
+}
+
+#[derive(Clone, Default)]
+struct SkillLoadout {
+    entries: Vec<SkillKind>,
+}
+
+impl SkillLoadout {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn jetpack_enabled(&self) -> bool {
+        self.entries.contains(&SkillKind::Jetpack)
+    }
+
+    fn heavy_count(&self) -> usize {
+        self.entries.iter().filter(|&&s| s == SkillKind::Heavy).count()
+    }
+
+    fn triple_count(&self) -> usize {
+        self.entries.iter().filter(|&&s| s == SkillKind::Triple).count()
+    }
+
+    fn scatter_selected(&self) -> bool {
+        self.entries.contains(&SkillKind::Scatter)
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn total_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn toggle(&mut self, skill: SkillKind) {
+        match skill {
+            SkillKind::Jetpack => {
+                if self.jetpack_enabled() {
+                    self.entries.clear();
+                } else {
+                    self.entries.clear();
+                    self.entries.push(SkillKind::Jetpack);
+                }
+            }
+            SkillKind::Scatter => {
+                if self.jetpack_enabled() {
+                    return;
+                }
+                if self.entries.contains(&SkillKind::Scatter) {
+                    self.entries.retain(|&s| s != SkillKind::Scatter);
+                } else {
+                    let mut candidate = self.entries.clone();
+                    candidate.push(SkillKind::Scatter);
+                    if is_valid_skill_combo(&candidate) {
+                        self.entries = candidate;
+                    }
+                }
+            }
+            SkillKind::Heavy => {
+                if self.jetpack_enabled() {
+                    return;
+                }
+                let current = self.heavy_count();
+                let mut base = self.entries.clone();
+                base.retain(|&s| s != SkillKind::Heavy);
+                match current {
+                    0 => {
+                        let mut candidate = self.entries.clone();
+                        candidate.push(SkillKind::Heavy);
+                        if is_valid_skill_combo(&candidate) {
+                            self.entries = candidate;
+                        }
+                    }
+                    1 => {
+                        let mut candidate = self.entries.clone();
+                        candidate.push(SkillKind::Heavy);
+                        if is_valid_skill_combo(&candidate) {
+                            self.entries = candidate;
+                        } else {
+                            self.entries = base;
+                        }
+                    }
+                    _ => {
+                        self.entries = base;
+                    }
+                }
+            }
+            SkillKind::Triple => {
+                if self.jetpack_enabled() {
+                    return;
+                }
+                let current = self.triple_count();
+                let mut base = self.entries.clone();
+                base.retain(|&s| s != SkillKind::Triple);
+                match current {
+                    0 => {
+                        let mut candidate = self.entries.clone();
+                        candidate.push(SkillKind::Triple);
+                        if is_valid_skill_combo(&candidate) {
+                            self.entries = candidate;
+                        }
+                    }
+                    1 => {
+                        let mut candidate = self.entries.clone();
+                        candidate.push(SkillKind::Triple);
+                        if is_valid_skill_combo(&candidate) {
+                            self.entries = candidate;
+                        } else {
+                            self.entries = base;
+                        }
+                    }
+                    _ => {
+                        self.entries = base;
+                    }
+                }
+            }
+        }
+        self.entries.sort_by_key(|s| match s {
+            SkillKind::Jetpack => 0,
+            SkillKind::Heavy => 1,
+            SkillKind::Triple => 2,
+            SkillKind::Scatter => 3,
+        });
+    }
+
+    fn labels(&self) -> Vec<&'static str> {
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let mut result = Vec::new();
+        for skill in &self.entries {
+            match skill {
+                SkillKind::Jetpack => result.push("jet"),
+                SkillKind::Heavy => result.push("heavy"),
+                SkillKind::Triple => result.push("consecutive"),
+                SkillKind::Scatter => result.push("scatter"),
+            }
+        }
+        result
+    }
+}
+
+fn is_valid_skill_combo(skills: &[SkillKind]) -> bool {
+    if skills.is_empty() {
+        return true;
+    }
+    if skills.len() > 2 {
+        return false;
+    }
+    if skills.contains(&SkillKind::Jetpack) {
+        return skills.len() == 1;
+    }
+
+    let heavy = skills.iter().filter(|&&s| s == SkillKind::Heavy).count();
+    let triple = skills.iter().filter(|&&s| s == SkillKind::Triple).count();
+    let scatter = skills.iter().any(|&s| s == SkillKind::Scatter);
+
+    match (heavy, triple, scatter) {
+        (0, 0, false) => true,
+        (1, 0, false) => true,
+        (2, 0, false) => true,
+        (0, 1, false) => true,
+        (0, 2, false) => true,
+        (0, 0, true) => true,
+        (1, 1, false) => true,
+        (1, 0, true) => true,
+        (0, 1, true) => true,
+        _ => false,
+    }
+}
+
+struct ShotTask {
+    time_until: f32,
+    base_angle: f32,
+    angle_offsets: Vec<f32>,
+    power: f32,
+    damage: f32,
+    owner_idx: usize,
+    origin: Vec2,
+    facing: f32,
+}
+
+fn build_shot_pattern(skills: &SkillLoadout) -> (Vec<(f32, Vec<f32>)>, f32) {
+    let heavy_count = skills.heavy_count();
+    let triple_count = skills.triple_count();
+    let scatter_selected = skills.scatter_selected();
+
+    let damage_multiplier = match heavy_count {
+        0 => 1.0,
+        1 => 1.5,
+        _ => 2.0,
+    };
+
+    let mut pattern: Vec<(f32, Vec<f32>)> = Vec::new();
+
+    match triple_count {
+        0 => {
+            if scatter_selected {
+                pattern.push((0.0, vec![-SCATTER_OFFSET_RAD, 0.0, SCATTER_OFFSET_RAD]));
+            }
+        }
+        1 => {
+            for idx in 0..3 {
+                let offsets = if scatter_selected {
+                    vec![-SCATTER_OFFSET_RAD, 0.0, SCATTER_OFFSET_RAD]
+                } else {
+                    vec![0.0]
+                };
+                pattern.push((TRIPLE_DELAY * idx as f32, offsets));
+            }
+        }
+        _ => {
+            for idx in 0..5 {
+                let offsets = if scatter_selected {
+                    vec![-SCATTER_OFFSET_RAD, 0.0, SCATTER_OFFSET_RAD]
+                } else {
+                    vec![0.0]
+                };
+                pattern.push((TRIPLE_DELAY * idx as f32, offsets));
+            }
+        }
+    }
+
+    (pattern, damage_multiplier)
+}
 
 fn window_conf() -> Conf {
     Conf {
@@ -220,6 +457,7 @@ struct Player {
     id: usize,
     spawn_hint: f32,
     name: &'static str,
+    skills: SkillLoadout,
 }
 
 impl Player {
@@ -255,17 +493,33 @@ impl Player {
             id,
             spawn_hint: preferred_x,
             name,
+            skills: SkillLoadout::new(),
         }
     }
 
     fn reset(&mut self, map: &Map) {
         let snapshot = Player::spawn_with_hint(map, self.id, self.color, self.spawn_hint, self.name);
         let preserved_health = self.health;
+        let skills = self.skills.clone();
         *self = snapshot;
         self.health = preserved_health;
+        self.skills = skills;
     }
 
     fn update(&mut self, map: &Map, dt: f32, controls_enabled: bool) {
+        if !self.is_alive() {
+            self.velocity = Vec2::ZERO;
+            self.is_airpack_flight = false;
+            self.is_charging = false;
+            let player_top = self.pos.y - PLAYER_HEIGHT;
+            let player_left = self.pos.x - PLAYER_WIDTH * 0.5;
+            let player_right = self.pos.x + PLAYER_WIDTH * 0.5;
+            if let Some(floor_y) = map.find_floor_below(player_left, player_right, player_top) {
+                self.pos.y = floor_y;
+            }
+            return;
+        }
+
         if self.is_airpack_flight {
             // preserve launch velocity while airborne due to airpack skill
         } else if controls_enabled && !self.is_charging {
@@ -406,30 +660,41 @@ impl Player {
     }
 
     fn draw(&self, active: bool) {
-        let x = self.pos.x - PLAYER_WIDTH * 0.5;
-        let y = self.pos.y - PLAYER_HEIGHT;
-        let body_color = if active {
-            self.color
+        let (body_width, body_height, body_top) = if self.is_alive() {
+            (PLAYER_WIDTH, PLAYER_HEIGHT, self.pos.y - PLAYER_HEIGHT)
         } else {
-            Color::new(
-                self.color.r * 0.7,
-                self.color.g * 0.7,
-                self.color.b * 0.7,
-                self.color.a,
-            )
+            (PLAYER_HEIGHT, PLAYER_WIDTH, self.pos.y - PLAYER_WIDTH)
         };
-        draw_rectangle(x, y, PLAYER_WIDTH, PLAYER_HEIGHT, body_color);
-        if active {
-            draw_rectangle_lines(x - 2.0, y - 2.0, PLAYER_WIDTH + 4.0, PLAYER_HEIGHT + 4.0, 2.0, WHITE);
+        let x = self.pos.x - body_width * 0.5;
+        let body_color = if self.is_alive() {
+            if active {
+                self.color
+            } else {
+                Color::new(
+                    self.color.r * 0.7,
+                    self.color.g * 0.7,
+                    self.color.b * 0.7,
+                    self.color.a,
+                )
+            }
+        } else {
+            DARKGRAY
+        };
+
+        draw_rectangle(x, body_top, body_width, body_height, body_color);
+        if active && self.is_alive() {
+            draw_rectangle_lines(x - 2.0, body_top - 2.0, body_width + 4.0, body_height + 4.0, 2.0, WHITE);
         }
 
-        let aim_origin = vec2(self.pos.x, self.pos.y - PLAYER_HEIGHT * 0.5);
-        let direction = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
-        let aim_end = aim_origin + direction.normalize() * 40.0;
-        draw_line(aim_origin.x, aim_origin.y, aim_end.x, aim_end.y, 2.0, WHITE);
+        if self.is_alive() {
+            let aim_origin = vec2(self.pos.x, self.pos.y - PLAYER_HEIGHT * 0.5);
+            let direction = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
+            let aim_end = aim_origin + direction.normalize() * 40.0;
+            draw_line(aim_origin.x, aim_origin.y, aim_end.x, aim_end.y, 2.0, WHITE);
+        }
 
         let bar_x = self.pos.x - HEALTH_BAR_WIDTH * 0.5;
-        let bar_y = y - HEALTH_BAR_HEIGHT - 6.0;
+        let bar_y = body_top - HEALTH_BAR_HEIGHT - 6.0;
         draw_rectangle(bar_x, bar_y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT, DARKGRAY);
         let health_ratio = (self.health / MAX_HEALTH).clamp(0.0, 1.0);
         if health_ratio > 0.0 {
@@ -437,11 +702,36 @@ impl Player {
         }
         draw_rectangle_lines(bar_x, bar_y, HEALTH_BAR_WIDTH, HEALTH_BAR_HEIGHT, 1.0, WHITE);
 
+        let percent_text = format!("{:.0}%", (health_ratio * 100.0).round());
+        let percent_dims = measure_text(&percent_text, None, 16, 1.0);
+        draw_text(
+            &percent_text,
+            self.pos.x - percent_dims.width * 0.5,
+            bar_y - 4.0,
+            16.0,
+            WHITE,
+        );
+
+        let mut text_cursor = bar_y - 22.0;
+        let labels = self.skills.labels();
+        if !labels.is_empty() {
+            let skill_line = labels.join(" & ");
+            let dims = measure_text(&skill_line, None, 16, 1.0);
+            draw_text(
+                &skill_line,
+                self.pos.x - dims.width * 0.5,
+                text_cursor,
+                16.0,
+                WHITE,
+            );
+            text_cursor -= 18.0;
+        }
+
         let name_dims = measure_text(self.name, None, 16, 1.0);
         draw_text(
             self.name,
             self.pos.x - name_dims.width * 0.5,
-            bar_y - 4.0,
+            text_cursor,
             16.0,
             WHITE,
         );
@@ -461,7 +751,13 @@ impl Player {
     }
 
     fn apply_damage(&mut self, amount: f32) {
+        let previous = self.health;
         self.health = (self.health - amount).max(0.0);
+        if previous > 0.0 && self.health <= 0.0 {
+            self.cancel_charge();
+            self.velocity = Vec2::ZERO;
+            self.is_airpack_flight = false;
+        }
     }
 
     fn is_alive(&self) -> bool {
@@ -479,16 +775,18 @@ struct Projectile {
     velocity: Vec2,
     active: bool,
     owner_id: usize,
+    damage: f32,
 }
 
 impl Projectile {
-    fn launch(origin: Vec2, facing: f32, angle: f32, power: f32, owner_id: usize) -> Self {
+    fn launch(origin: Vec2, facing: f32, angle: f32, power: f32, owner_id: usize, damage: f32) -> Self {
         let dir = vec2(facing * angle.cos(), -angle.sin()).normalize();
         Self {
             pos: origin,
             velocity: dir * power,
             active: true,
             owner_id,
+            damage,
         }
     }
 
@@ -536,18 +834,14 @@ async fn main() {
     let mut map = Map::from_csv(MAP_PATH);
     let total_width = map.total_width();
     let mut players = vec![
-        Player::spawn_with_hint(&map, 0, GOLD, total_width * 0.25, "玩家一"),
-        Player::spawn_with_hint(&map, 1, SKYBLUE, total_width * 0.75, "玩家二"),
+        Player::spawn_with_hint(&map, 0, GOLD, total_width * 0.25, "Player 1"),
+        Player::spawn_with_hint(&map, 1, SKYBLUE, total_width * 0.75, "Player 2"),
     ];
     let mut active_index: usize = 0;
     let mut turn_timer = TURN_DURATION;
-    let mut projectile = Projectile {
-        pos: Vec2::ZERO,
-        velocity: Vec2::ZERO,
-        active: false,
-        owner_id: usize::MAX,
-    };
-    let mut airpack_mode = false;
+    let mut projectiles: Vec<Projectile> = Vec::new();
+    let mut pending_shots: Vec<ShotTask> = Vec::new();
+    let mut pending_turn_after_action = false;
 
     loop {
         let dt = get_frame_time();
@@ -558,14 +852,10 @@ async fn main() {
         }
 
         let controls_enabled = players[active_index].is_alive();
-        let button_rect = airpack_button_rect();
+
         if controls_enabled && is_mouse_button_pressed(MouseButton::Left) {
-            let (mx, my) = mouse_position();
-            if button_rect.contains(vec2(mx, my)) {
-                airpack_mode = !airpack_mode;
-            }
-        } else if !controls_enabled {
-            airpack_mode = false;
+            let mouse = vec2(mouse_position().0, mouse_position().1);
+            handle_skill_button_click(mouse, &mut players[active_index]);
         }
 
         for idx in 0..players.len() {
@@ -576,37 +866,120 @@ async fn main() {
         if controls_enabled && players[active_index].is_charging && is_key_released(KeyCode::Space) {
             let charge = players[active_index].charge_power;
             if charge > 0.0 {
-                if airpack_mode {
+                if players[active_index].skills.jetpack_enabled() {
                     players[active_index].launch_self(charge);
-                    airpack_mode = false;
+                    pending_turn_after_action = true;
                 } else {
-                    let origin = vec2(players[active_index].pos.x, players[active_index].pos.y - PLAYER_HEIGHT * 0.5);
-                    projectile = Projectile::launch(
-                        origin,
-                        players[active_index].facing,
-                        players[active_index].launch_angle,
-                        charge,
-                        active_index,
+                    let base_angle = players[active_index].launch_angle;
+                    let origin = vec2(
+                        players[active_index].pos.x,
+                        players[active_index].pos.y - PLAYER_HEIGHT * 0.5,
                     );
+                    let facing = players[active_index].facing;
+                    let (pattern, damage_multiplier) = build_shot_pattern(&players[active_index].skills);
+                    let damage = EXPLOSION_DAMAGE * damage_multiplier;
+                    if pattern.is_empty() {
+                        pending_shots.push(ShotTask {
+                            time_until: 0.0,
+                            base_angle,
+                            angle_offsets: vec![0.0],
+                            power: charge,
+                            damage,
+                            owner_idx: active_index,
+                            origin,
+                            facing,
+                        });
+                    } else {
+                        for (delay, offsets) in pattern {
+                            pending_shots.push(ShotTask {
+                                time_until: delay,
+                                base_angle,
+                                angle_offsets: offsets,
+                                power: charge,
+                                damage,
+                                owner_idx: active_index,
+                                origin,
+                                facing,
+                            });
+                        }
+                    }
+                    pending_turn_after_action = true;
                 }
             }
             players[active_index].cancel_charge();
         }
 
-        if projectile.active {
-            if let Some(hit_pos) = projectile.update(&map, dt) {
-                map.carve_circle(hit_pos, EXPLOSION_RADIUS);
-                apply_explosion_damage(hit_pos, &mut players);
+        let mut ready_tasks: Vec<ShotTask> = Vec::new();
+        let mut idx = 0;
+        while idx < pending_shots.len() {
+            pending_shots[idx].time_until -= dt;
+            if pending_shots[idx].time_until <= 0.0 {
+                ready_tasks.push(pending_shots.remove(idx));
+            } else {
+                idx += 1;
             }
         }
 
-        if !players[active_index].is_alive() {
-            advance_turn(&mut active_index, &mut turn_timer, &mut airpack_mode, &mut players);
-        } else {
-            turn_timer -= dt;
-            if turn_timer <= 0.0 {
-                advance_turn(&mut active_index, &mut turn_timer, &mut airpack_mode, &mut players);
+        for task in ready_tasks {
+            for offset in &task.angle_offsets {
+                let mut angle = task.base_angle + *offset;
+                angle = angle.clamp(MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE);
+                projectiles.push(Projectile::launch(
+                    task.origin,
+                    task.facing,
+                    angle,
+                    task.power,
+                    task.owner_idx,
+                    task.damage,
+                ));
             }
+        }
+
+        let mut impacts: Vec<(Vec2, f32)> = Vec::new();
+        for proj in projectiles.iter_mut() {
+            if !proj.active {
+                continue;
+            }
+            if let Some(hit_pos) = proj.update(&map, dt) {
+                impacts.push((hit_pos, proj.damage));
+                proj.active = false;
+            }
+        }
+
+        for (hit_pos, damage) in impacts {
+            map.carve_circle(hit_pos, EXPLOSION_RADIUS);
+            apply_explosion_damage(hit_pos, damage, &mut players);
+        }
+
+        projectiles.retain(|p| p.active);
+
+        if players[active_index].is_alive() {
+            if !pending_turn_after_action {
+                turn_timer -= dt;
+            }
+        }
+
+        let mut turn_should_end = false;
+        if !players[active_index].is_alive() {
+            turn_should_end = true;
+            pending_turn_after_action = false;
+            pending_shots.clear();
+            projectiles.clear();
+        }
+
+        if pending_turn_after_action && pending_shots.is_empty() && projectiles.is_empty() {
+            turn_should_end = true;
+            pending_turn_after_action = false;
+        }
+
+        if turn_timer <= 0.0 {
+            turn_should_end = true;
+            pending_turn_after_action = false;
+            pending_shots.clear();
+        }
+
+        if turn_should_end {
+            advance_turn(&mut active_index, &mut turn_timer, &mut players);
         }
 
         clear_background(BLACK);
@@ -615,12 +988,19 @@ async fn main() {
             let is_active = idx == active_index && players[idx].is_alive();
             players[idx].draw(is_active);
         }
-        projectile.draw();
-        let active_alive_now = players[active_index].is_alive();
+        for proj in &projectiles {
+            proj.draw();
+        }
         let charge_player = players.get(active_index).filter(|p| p.is_alive());
         draw_charge_bar(charge_player);
-        draw_airpack_button(airpack_mode, active_alive_now);
-        draw_turn_timer(turn_timer, players.get(active_index).filter(|p| p.is_alive()).map(|p| p.name));
+        draw_skill_buttons(players.get(active_index));
+        draw_turn_timer(
+            turn_timer,
+            players
+                .get(active_index)
+                .filter(|p| p.is_alive())
+                .map(|p| p.name),
+        );
 
         next_frame().await;
     }
@@ -645,7 +1025,7 @@ fn draw_charge_bar(player: Option<&Player>) {
     draw_rectangle_lines(x, y, CHARGE_BAR_WIDTH, CHARGE_BAR_HEIGHT, 2.0, WHITE);
 
     if let Some(p) = player {
-        let label = format!("{} 蓄力", p.name);
+        let label = format!("{} Ready", p.name);
         let dims = measure_text(&label, None, 18, 1.0);
         draw_text(
             &label,
@@ -655,7 +1035,7 @@ fn draw_charge_bar(player: Option<&Player>) {
             WHITE,
         );
     } else {
-        let label = "等待下一位";
+        let label = "wait for next turn";
         let dims = measure_text(label, None, 18, 1.0);
         draw_text(
             label,
@@ -667,39 +1047,93 @@ fn draw_charge_bar(player: Option<&Player>) {
     }
 }
 
-fn airpack_button_rect() -> Rect {
-    let x = AIRPACK_BTN_MARGIN;
+const SKILL_BUTTONS: [(SkillKind, &str); 4] = [
+    (SkillKind::Jetpack, "jet"),
+    (SkillKind::Heavy, "heavy"),
+    (SkillKind::Triple, "consecutive"),
+    (SkillKind::Scatter, "scatter"),
+];
+
+fn skill_button_rect(index: usize) -> Rect {
+    let start_x = AIRPACK_BTN_MARGIN;
     let y = screen_height() - AIRPACK_BTN_MARGIN - AIRPACK_BTN_HEIGHT;
+    let x = start_x + index as f32 * (AIRPACK_BTN_WIDTH + SKILL_BUTTON_GAP);
     Rect::new(x, y, AIRPACK_BTN_WIDTH, AIRPACK_BTN_HEIGHT)
 }
 
-fn draw_airpack_button(toggled: bool, enabled: bool) {
-    let rect = airpack_button_rect();
-    let base_color = if !enabled {
-        GRAY
-    } else if toggled {
-        ORANGE
+fn draw_skill_buttons(player: Option<&Player>) {
+    let (jetpack_enabled, heavy_count, triple_count, scatter_selected) = if let Some(p) = player {
+        (
+            p.skills.jetpack_enabled(),
+            p.skills.heavy_count(),
+            p.skills.triple_count(),
+            p.skills.scatter_selected(),
+        )
     } else {
-        DARKGRAY
+        (false, 0, 0, false)
     };
-    draw_rectangle(rect.x, rect.y, rect.w, rect.h, base_color);
-    draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 2.0, WHITE);
 
-    let label = "空气背包";
-    let text_size = 24;
-    let text_width = measure_text(label, None, text_size, 1.0).width;
-    let text_x = rect.x + (rect.w - text_width) * 0.5;
-    let text_y = rect.y + rect.h * 0.65;
-    let text_color = if enabled { WHITE } else { LIGHTGRAY };
-    draw_text(label, text_x, text_y, text_size as f32, text_color);
+    for (index, (skill, base_label)) in SKILL_BUTTONS.iter().enumerate() {
+        let rect = skill_button_rect(index);
+        let enabled = player.map_or(false, |p| p.is_alive());
+        let (selected, label) = match skill {
+            SkillKind::Jetpack => (jetpack_enabled, base_label.to_string()),
+            SkillKind::Heavy => (
+                heavy_count > 0,
+                if heavy_count > 1 {
+                    format!("{} x{}", base_label, heavy_count)
+                } else {
+                    base_label.to_string()
+                },
+            ),
+            SkillKind::Triple => (
+                triple_count > 0,
+                if triple_count > 1 {
+                    format!("{} x{}", base_label, triple_count)
+                } else {
+                    base_label.to_string()
+                },
+            ),
+            SkillKind::Scatter => (scatter_selected, base_label.to_string()),
+        };
+
+        let base_color = if !enabled {
+            GRAY
+        } else if selected {
+            ORANGE
+        } else {
+            DARKGRAY
+        };
+
+        draw_rectangle(rect.x, rect.y, rect.w, rect.h, base_color);
+        draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 2.0, WHITE);
+
+        let text_size = 22;
+        let dims = measure_text(&label, None, text_size, 1.0);
+        let text_x = rect.x + (rect.w - dims.width) * 0.5;
+        let text_y = rect.y + rect.h * 0.65;
+        let text_color = if enabled { WHITE } else { LIGHTGRAY };
+        draw_text(&label, text_x, text_y, text_size as f32, text_color);
+    }
+}
+
+fn handle_skill_button_click(mouse: Vec2, player: &mut Player) -> bool {
+    for (index, (skill, _)) in SKILL_BUTTONS.iter().enumerate() {
+        let rect = skill_button_rect(index);
+        if rect.contains(mouse) {
+            player.skills.toggle(*skill);
+            return true;
+        }
+    }
+    false
 }
 
 fn draw_turn_timer(time_remaining: f32, active_name: Option<&str>) {
     let seconds = time_remaining.max(0.0).ceil();
     let label = if let Some(name) = active_name {
-        format!("{} 回合剩余 {:.0}s", name, seconds)
+        format!("{} round remain {:.0}s", name, seconds)
     } else {
-        "等待玩家".to_string()
+        "wait for player".to_string()
     };
     let dims = measure_text(&label, None, 24, 1.0);
     let x = screen_width() - dims.width - 24.0;
@@ -707,7 +1141,7 @@ fn draw_turn_timer(time_remaining: f32, active_name: Option<&str>) {
     draw_text(&label, x, y, 24.0, WHITE);
 }
 
-fn apply_explosion_damage(center: Vec2, players: &mut [Player]) {
+fn apply_explosion_damage(center: Vec2, base_damage: f32, players: &mut [Player]) {
     for player in players.iter_mut() {
         if !player.is_alive() {
             continue;
@@ -717,7 +1151,7 @@ fn apply_explosion_damage(center: Vec2, players: &mut [Player]) {
         let effective_radius = EXPLOSION_RADIUS + PLAYER_WIDTH * 0.5;
         if distance <= effective_radius {
             let falloff = 1.0 - (distance / effective_radius).clamp(0.0, 1.0);
-            let damage = EXPLOSION_DAMAGE * falloff;
+            let damage = base_damage * falloff;
             if damage > 0.0 {
                 player.apply_damage(damage);
             }
@@ -743,16 +1177,10 @@ fn ensure_active_player_alive(active_index: &mut usize, players: &[Player]) -> b
     false
 }
 
-fn advance_turn(
-    active_index: &mut usize,
-    turn_timer: &mut f32,
-    airpack_mode: &mut bool,
-    players: &mut [Player],
-) {
+fn advance_turn(active_index: &mut usize, turn_timer: &mut f32, players: &mut [Player]) {
     if let Some(active) = players.get_mut(*active_index) {
         active.cancel_charge();
     }
-    *airpack_mode = false;
     *turn_timer = TURN_DURATION;
 
     if players.iter().all(|p| !p.is_alive()) {
@@ -775,7 +1203,7 @@ fn draw_game_over_scene(map: &Map, players: &[Player]) {
     for player in players {
         player.draw(false);
     }
-    let message = "游戏结束";
+    let message = "Game Over";
     let dims = measure_text(message, None, 36, 1.0);
     draw_text(
         message,
