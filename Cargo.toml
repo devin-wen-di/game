@@ -1,0 +1,8 @@
+[package]
+name = "my-game"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = "0.4"
+rand = "0.8"  # 如果用 gen_range
