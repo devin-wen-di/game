@@ -11,6 +11,10 @@ const MOVE_SPEED: f32 = 120.0;
 const SMOOTH_FACTOR: f32 = 12.0;
 const GRAVITY: f32 = 400.0;
 const MAX_UP_STEP: f32 = TILE_SIZE * 3.0;
+const MAX_DOWN_STEP: f32 = TILE_SIZE * 6.0;
+const PLAYER_SUBSTEP_DT: f32 = 1.0 / 120.0;
+const PROJECTILE_SUBSTEP_DT: f32 = 1.0 / 240.0;
+const GROUND_EPSILON: f32 = 0.25;
 const MIN_LAUNCH_ANGLE: f32 = 30.0_f32.to_radians();
 const MAX_LAUNCH_ANGLE: f32 = 80.0_f32.to_radians();
 const POWER_MAX: f32 = 600.0;
@@ -265,13 +269,21 @@ impl Player {
         if self.on_ground && step.abs() > f32::EPSILON {
             let target_left = (self.pos.x + step) - PLAYER_WIDTH * 0.5;
             let target_right = (self.pos.x + step) + PLAYER_WIDTH * 0.5;
-            if let (Some(current_surface), Some(target_surface)) = (
-                current_floor,
-                map.find_floor_below(target_left, target_right, player_top),
-            ) {
-                if target_surface < current_surface
-                    && (current_surface - target_surface) > MAX_UP_STEP
-                {
+            let target_floor = map.find_floor_below(target_left, target_right, player_top);
+            if let Some(current_surface) = current_floor {
+                if let Some(target_surface) = target_floor {
+                    if target_surface < current_surface
+                        && (current_surface - target_surface) > MAX_UP_STEP
+                    {
+                        step = 0.0;
+                        self.velocity.x = 0.0;
+                    } else if target_surface > current_surface
+                        && (target_surface - current_surface) > MAX_DOWN_STEP
+                    {
+                        step = 0.0;
+                        self.velocity.x = 0.0;
+                    }
+                } else {
                     step = 0.0;
                     self.velocity.x = 0.0;
                 }
@@ -300,23 +312,52 @@ impl Player {
             self.charge_power = (self.charge_power + POWER_RATE * dt).min(POWER_MAX);
         }
 
-        self.velocity.y += GRAVITY * dt;
-        self.pos.y += self.velocity.y * dt;
         self.on_ground = false;
+        let mut remaining_time = dt;
+        while remaining_time > f32::EPSILON {
+            let step_dt = remaining_time.min(PLAYER_SUBSTEP_DT);
+            remaining_time -= step_dt;
 
-        let next_top = self.pos.y - PLAYER_HEIGHT;
-        let next_left = self.pos.x - PLAYER_WIDTH * 0.5;
-        let next_right = self.pos.x + PLAYER_WIDTH * 0.5;
+            self.velocity.y += GRAVITY * step_dt;
+            let proposed_y = self.pos.y + self.velocity.y * step_dt;
+            let next_top = proposed_y - PLAYER_HEIGHT;
+            let next_left = self.pos.x - PLAYER_WIDTH * 0.5;
+            let next_right = self.pos.x + PLAYER_WIDTH * 0.5;
 
-        if let Some(floor_y) = map.find_floor_below(next_left, next_right, next_top) {
-            if self.velocity.y >= 0.0 && self.pos.y >= floor_y {
-                self.pos.y = floor_y;
-                self.velocity.y = 0.0;
-                self.on_ground = true;
+            let mut landed = false;
+            if self.velocity.y >= 0.0 {
+                if let Some(floor_y) = map.find_floor_below(next_left, next_right, next_top) {
+                    if proposed_y >= floor_y - GROUND_EPSILON {
+                        self.pos.y = floor_y;
+                        self.velocity.y = 0.0;
+                        self.on_ground = true;
+                        landed = true;
+                    }
+                }
             }
-        } else if self.pos.y - PLAYER_HEIGHT > map.total_height() + PLAYER_HEIGHT {
-            self.reset(map);
-            return;
+
+            if landed {
+                break;
+            }
+
+            self.pos.y = proposed_y;
+        }
+
+        if !self.on_ground {
+            let next_top = self.pos.y - PLAYER_HEIGHT;
+            let next_left = self.pos.x - PLAYER_WIDTH * 0.5;
+            let next_right = self.pos.x + PLAYER_WIDTH * 0.5;
+
+            if let Some(floor_y) = map.find_floor_below(next_left, next_right, next_top) {
+                if self.velocity.y >= 0.0 && self.pos.y >= floor_y - GROUND_EPSILON {
+                    self.pos.y = floor_y;
+                    self.velocity.y = 0.0;
+                    self.on_ground = true;
+                }
+            } else if self.pos.y - PLAYER_HEIGHT > map.total_height() + PLAYER_HEIGHT {
+                self.reset(map);
+                return;
+            }
         }
 
         if self.pos.y < -PLAYER_HEIGHT * 2.0 {
@@ -355,12 +396,36 @@ impl Projectile {
         }
     }
 
-    fn update(&mut self, dt: f32) {
+    fn update(&mut self, map: &Map, dt: f32) -> Option<Vec2> {
         if !self.active {
-            return;
+            return None;
         }
-        self.velocity.y += GRAVITY * dt;
-        self.pos += self.velocity * dt;
+        let mut remaining_time = dt;
+        while remaining_time > f32::EPSILON {
+            let step_dt = remaining_time.min(PROJECTILE_SUBSTEP_DT);
+            remaining_time -= step_dt;
+
+            self.velocity.y += GRAVITY * step_dt;
+            self.pos += self.velocity * step_dt;
+
+            if self.pos.x < 0.0
+                || self.pos.x > map.total_width()
+                || self.pos.y < 0.0
+                || self.pos.y > map.total_height()
+            {
+                self.active = false;
+                return None;
+            }
+
+            if let Some((row, col)) = map.world_to_grid(self.pos.x, self.pos.y) {
+                if map.is_solid(row, col) {
+                    self.active = false;
+                    return Some(self.pos);
+                }
+            }
+        }
+
+        None
     }
 
     fn draw(&self) {
@@ -397,18 +462,8 @@ async fn main() {
         }
 
         if projectile.active {
-            projectile.update(dt);
-            if projectile.pos.x < 0.0
-                || projectile.pos.x > map.total_width()
-                || projectile.pos.y < 0.0
-                || projectile.pos.y > map.total_height()
-            {
-                projectile.active = false;
-            } else if let Some((row, col)) = map.world_to_grid(projectile.pos.x, projectile.pos.y) {
-                if map.is_solid(row, col) {
-                    map.carve_circle(projectile.pos, EXPLOSION_RADIUS);
-                    projectile.active = false;
-                }
+            if let Some(hit_pos) = projectile.update(&map, dt) {
+                map.carve_circle(hit_pos, EXPLOSION_RADIUS);
             }
         }
 
