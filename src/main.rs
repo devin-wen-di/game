@@ -17,10 +17,16 @@ const PROJECTILE_SUBSTEP_DT: f32 = 1.0 / 240.0;
 const GROUND_EPSILON: f32 = 0.25;
 const MIN_LAUNCH_ANGLE: f32 = 30.0_f32.to_radians();
 const MAX_LAUNCH_ANGLE: f32 = 80.0_f32.to_radians();
-const POWER_MAX: f32 = 600.0;
+const POWER_MAX: f32 = 1000.0;
 const POWER_RATE: f32 = 240.0;
 const PROJECTILE_RADIUS: f32 = 6.0;
 const EXPLOSION_RADIUS: f32 = 50.0;
+const CHARGE_BAR_WIDTH: f32 = 220.0;
+const CHARGE_BAR_HEIGHT: f32 = 12.0;
+const CHARGE_BAR_MARGIN: f32 = 16.0;
+const AIRPACK_BTN_WIDTH: f32 = 140.0;
+const AIRPACK_BTN_HEIGHT: f32 = 40.0;
+const AIRPACK_BTN_MARGIN: f32 = 16.0;
 
 fn window_conf() -> Conf {
     Conf {
@@ -203,6 +209,7 @@ struct Player {
     launch_angle: f32,
     is_charging: bool,
     charge_power: f32,
+    is_airpack_flight: bool,
 }
 
 impl Player {
@@ -228,6 +235,7 @@ impl Player {
             launch_angle: MIN_LAUNCH_ANGLE,
             is_charging: false,
             charge_power: 0.0,
+            is_airpack_flight: false,
         }
     }
 
@@ -236,7 +244,9 @@ impl Player {
     }
 
     fn update(&mut self, map: &Map, dt: f32) {
-        if !self.is_charging {
+        if self.is_airpack_flight {
+            // preserve launch velocity while airborne due to airpack skill
+        } else if !self.is_charging {
             let mut input: f32 = 0.0;
             if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
                 input -= 1.0;
@@ -331,6 +341,7 @@ impl Player {
                         self.pos.y = floor_y;
                         self.velocity.y = 0.0;
                         self.on_ground = true;
+                        self.is_airpack_flight = false;
                         landed = true;
                     }
                 }
@@ -353,6 +364,7 @@ impl Player {
                     self.pos.y = floor_y;
                     self.velocity.y = 0.0;
                     self.on_ground = true;
+                    self.is_airpack_flight = false;
                 }
             } else if self.pos.y - PLAYER_HEIGHT > map.total_height() + PLAYER_HEIGHT {
                 self.reset(map);
@@ -377,6 +389,19 @@ impl Player {
         let direction = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
         let aim_end = aim_origin + direction.normalize() * 40.0;
         draw_line(aim_origin.x, aim_origin.y, aim_end.x, aim_end.y, 2.0, WHITE);
+    }
+
+    fn launch_self(&mut self, power: f32) {
+        let mut dir = vec2(self.facing * self.launch_angle.cos(), -self.launch_angle.sin());
+        if dir.length_squared() > f32::EPSILON {
+            dir = dir.normalize();
+        } else {
+            dir = vec2(self.facing, 0.0);
+        }
+        self.is_airpack_flight = true;
+        self.on_ground = false;
+        self.velocity = dir * power;
+        self.pos += dir * 2.0;
     }
 }
 
@@ -444,16 +469,29 @@ async fn main() {
         velocity: Vec2::ZERO,
         active: false,
     };
+    let mut airpack_mode = false;
 
     loop {
         let dt = get_frame_time();
+        let button_rect = airpack_button_rect();
+        if is_mouse_button_pressed(MouseButton::Left) {
+            let (mx, my) = mouse_position();
+            if button_rect.contains(vec2(mx, my)) {
+                airpack_mode = !airpack_mode;
+            }
+        }
 
         player.update(&map, dt);
 
         if player.is_charging && is_key_released(KeyCode::Space) {
             if player.charge_power > 0.0 {
-                let origin = vec2(player.pos.x, player.pos.y - PLAYER_HEIGHT * 0.5);
-                projectile = Projectile::launch(origin, player.facing, player.launch_angle, player.charge_power);
+                if airpack_mode {
+                    player.launch_self(player.charge_power);
+                    airpack_mode = false;
+                } else {
+                    let origin = vec2(player.pos.x, player.pos.y - PLAYER_HEIGHT * 0.5);
+                    projectile = Projectile::launch(origin, player.facing, player.launch_angle, player.charge_power);
+                }
                 player.is_charging = false;
                 player.charge_power = 0.0;
             } else {
@@ -471,7 +509,46 @@ async fn main() {
         map.draw();
         player.draw();
         projectile.draw();
+        draw_charge_bar(&player);
+        draw_airpack_button(airpack_mode);
 
         next_frame().await;
     }
+}
+
+fn draw_charge_bar(player: &Player) {
+    let ratio = (player.charge_power / POWER_MAX).clamp(0.0, 1.0);
+    let x = (screen_width() - CHARGE_BAR_WIDTH) * 0.5;
+    let y = CHARGE_BAR_MARGIN;
+    draw_rectangle(x, y, CHARGE_BAR_WIDTH, CHARGE_BAR_HEIGHT, DARKGRAY);
+    if ratio > 0.0 {
+        draw_rectangle(
+            x,
+            y,
+            CHARGE_BAR_WIDTH * ratio,
+            CHARGE_BAR_HEIGHT,
+            RED,
+        );
+    }
+    draw_rectangle_lines(x, y, CHARGE_BAR_WIDTH, CHARGE_BAR_HEIGHT, 2.0, WHITE);
+}
+
+fn airpack_button_rect() -> Rect {
+    let x = AIRPACK_BTN_MARGIN;
+    let y = screen_height() - AIRPACK_BTN_MARGIN - AIRPACK_BTN_HEIGHT;
+    Rect::new(x, y, AIRPACK_BTN_WIDTH, AIRPACK_BTN_HEIGHT)
+}
+
+fn draw_airpack_button(active: bool) {
+    let rect = airpack_button_rect();
+    let base_color = if active { ORANGE } else { DARKGRAY };
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, base_color);
+    draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 2.0, WHITE);
+
+    let label = "jet pack";
+    let text_size = 26;
+    let text_width = measure_text(label, None, text_size, 1.0).width;
+    let text_x = rect.x + (rect.w - text_width) * 0.5;
+    let text_y = rect.y + rect.h * 0.6;
+    draw_text(label, text_x, text_y, text_size as f32, WHITE);
 }
