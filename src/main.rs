@@ -20,7 +20,7 @@ const MAX_LAUNCH_ANGLE: f32 = 80.0_f32.to_radians();
 const POWER_MAX: f32 = 1000.0;
 const POWER_RATE: f32 = 240.0;
 const PROJECTILE_RADIUS: f32 = 6.0;
-const EXPLOSION_RADIUS: f32 = 50.0;
+const EXPLOSION_RADIUS: f32 = 60.0;
 const EXPLOSION_DAMAGE: f32 = 35.0;
 const CHARGE_BAR_WIDTH: f32 = 220.0;
 const CHARGE_BAR_HEIGHT: f32 = 12.0;
@@ -768,6 +768,17 @@ impl Player {
         self.is_charging = false;
         self.charge_power = 0.0;
     }
+
+    fn projectile_angle_bounds(&self) -> (f32, f32) {
+        if self.skills.scatter_selected() {
+            (
+                (MIN_LAUNCH_ANGLE - SCATTER_OFFSET_RAD).max(0.0),
+                MAX_LAUNCH_ANGLE + SCATTER_OFFSET_RAD,
+            )
+        } else {
+            (MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE)
+        }
+    }
 }
 
 struct Projectile {
@@ -920,9 +931,13 @@ async fn main() {
         }
 
         for task in ready_tasks {
+            let (min_angle, max_angle) = players
+                .get(task.owner_idx)
+                .map(Player::projectile_angle_bounds)
+                .unwrap_or((MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE));
             for offset in &task.angle_offsets {
                 let mut angle = task.base_angle + *offset;
-                angle = angle.clamp(MIN_LAUNCH_ANGLE, MAX_LAUNCH_ANGLE);
+                angle = angle.clamp(min_angle, max_angle);
                 projectiles.push(Projectile::launch(
                     task.origin,
                     task.facing,
