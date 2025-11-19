@@ -8,6 +8,7 @@ use crate::config::{
     PLAYER_NAMES, PLAYER_SUBSTEP_DT, PLAYER_WIDTH, POWER_MAX, POWER_RATE, SCATTER_OFFSET_RAD,
     SMOOTH_FACTOR, TILE_SIZE,
 };
+use crate::controls::ControlState;
 use crate::map::Map;
 use crate::skills::SkillLoadout;
 
@@ -28,7 +29,7 @@ pub struct Player {
 }
 
 impl Player {
-    pub fn update(&mut self, map: &Map, dt: f32, controls_enabled: bool) {
+    pub fn update(&mut self, map: &Map, dt: f32, controls_enabled: bool, control: ControlState) {
         if !self.is_alive() {
             self.velocity = Vec2::ZERO;
             self.is_airpack_flight = false;
@@ -45,17 +46,11 @@ impl Player {
         if self.is_airpack_flight {
             // retain velocity while jetpacking
         } else if controls_enabled && !self.is_charging {
-            let mut input: f32 = 0.0;
-            if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
-                input -= 1.0;
+            let input_axis = (control.move_axis as f32).clamp(-1.0, 1.0);
+            if input_axis.abs() > 0.1 {
+                self.facing = input_axis.signum();
             }
-            if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
-                input += 1.0;
-            }
-            if input.abs() > 0.1 {
-                self.facing = input.signum();
-            }
-            let target_speed = input * MOVE_SPEED;
+            let target_speed = input_axis * MOVE_SPEED;
             let smoothing = (SMOOTH_FACTOR * dt).clamp(0.0, 1.0);
             self.velocity.x += (target_speed - self.velocity.x) * smoothing;
             if target_speed.abs() < 1.0 && self.velocity.x.abs() < 1.0 {
@@ -102,16 +97,16 @@ impl Player {
             self.velocity.x = 0.0;
         }
 
-        if controls_enabled && is_key_down(KeyCode::Up) {
+        if controls_enabled && control.aim_up {
             self.launch_angle += 1.2 * dt;
         }
-        if controls_enabled && is_key_down(KeyCode::Down) {
+        if controls_enabled && control.aim_down {
             self.launch_angle -= 1.2 * dt;
         }
         let (min_angle, max_angle) = self.relative_launch_angle_bounds();
         self.launch_angle = self.launch_angle.clamp(min_angle, max_angle);
 
-        if controls_enabled && is_key_pressed(KeyCode::Space) {
+        if controls_enabled && control.start_charge {
             self.is_charging = true;
             self.charge_power = 0.0;
         } else if !controls_enabled {

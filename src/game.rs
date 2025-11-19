@@ -1,17 +1,43 @@
 use macroquad::prelude::*;
+use std::env;
 
 use crate::config::{
     COLS, EXPLOSION_DAMAGE, EXPLOSION_RADIUS, MAP_PATH, PLAYER_COLORS, ROWS, TILE_SIZE,
     TURN_DURATION,
 };
+use crate::controls::{ControlState, SkillCommand};
 use crate::map::Map;
+use crate::net::host::NetworkInputHost;
 use crate::player::{Player, apply_explosion_damage, create_players};
 use crate::projectile::Projectile;
 use crate::skills::build_shot_pattern;
 use crate::ui::{
-    draw_charge_bar, draw_game_over_scene, draw_skill_buttons, draw_turn_timer,
-    handle_skill_button_click,
+    draw_charge_bar, draw_game_over_scene, draw_skill_buttons, draw_turn_timer, skill_button_hit,
 };
+
+const LOCAL_PLAYER_SLOT: usize = 0;
+
+pub struct LaunchOptions {
+    pub listen_addr: Option<String>,
+}
+
+impl LaunchOptions {
+    pub fn from_env() -> Self {
+        let mut listen_addr = None;
+        let mut args = env::args().skip(1);
+        while let Some(arg) = args.next() {
+            match arg.as_str() {
+                "--listen" => {
+                    if let Some(addr) = args.next() {
+                        listen_addr = Some(addr);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Self { listen_addr }
+    }
+}
 
 #[derive(Clone)]
 pub enum GamePhase {
@@ -42,7 +68,7 @@ pub fn window_conf() -> Conf {
     }
 }
 
-pub async fn run_game() {
+pub async fn run_game(options: LaunchOptions) {
     let mut map = Map::from_csv(MAP_PATH);
     let mut players: Vec<Player> = Vec::new();
     let mut active_index: usize = 0;
@@ -51,9 +77,23 @@ pub async fn run_game() {
     let mut pending_shots: Vec<ShotTask> = Vec::new();
     let mut pending_turn_after_action = false;
     let mut phase = GamePhase::StartMenu;
+    let mut net_host =
+        options
+            .listen_addr
+            .as_ref()
+            .and_then(|addr| match NetworkInputHost::bind(addr) {
+                Ok(host) => Some(host),
+                Err(err) => {
+                    eprintln!("Failed to bind network listener at {addr}: {err}");
+                    None
+                }
+            });
 
     'game: loop {
         let dt = get_frame_time();
+        if let Some(server) = net_host.as_mut() {
+            server.poll();
+        }
         match phase.clone() {
             GamePhase::StartMenu => {
                 clear_background(BLACK);
@@ -169,6 +209,9 @@ pub async fn run_game() {
                         &mut pending_shots,
                         &mut pending_turn_after_action,
                     );
+                    if let Some(server) = net_host.as_mut() {
+                        server.configure_slots(count);
+                    }
                     phase = GamePhase::Playing;
                     continue 'game;
                 }
@@ -186,20 +229,40 @@ pub async fn run_game() {
 
                 let controls_enabled = players[active_index].is_alive();
 
-                if controls_enabled && is_mouse_button_pressed(MouseButton::Left) {
-                    let mouse = vec2(mouse_position().0, mouse_position().1);
-                    handle_skill_button_click(mouse, &mut players[active_index]);
+                let mut control_states = vec![ControlState::idle(); players.len()];
+                if let Some(server) = net_host.as_ref() {
+                    server.fill_states(&mut control_states);
+                }
+
+                if let Some(local_state) = control_states.get_mut(LOCAL_PLAYER_SLOT) {
+                    let allow = controls_enabled && active_index == LOCAL_PLAYER_SLOT;
+                    *local_state = collect_local_input(allow);
                 }
 
                 for idx in 0..players.len() {
                     let enable = idx == active_index && controls_enabled;
-                    players[idx].update(&map, dt, enable);
+                    let input = control_states
+                        .get(idx)
+                        .copied()
+                        .unwrap_or_else(ControlState::idle);
+                    players[idx].update(&map, dt, enable, input);
                 }
 
-                if controls_enabled
-                    && players[active_index].is_charging()
-                    && is_key_released(KeyCode::Space)
-                {
+                if controls_enabled {
+                    if let Some(cmd) = control_states
+                        .get(active_index)
+                        .and_then(|state| state.skill_command)
+                    {
+                        players[active_index].skills_mut().toggle(cmd.kind());
+                    }
+                }
+
+                let release_charge = control_states
+                    .get(active_index)
+                    .map(|state| state.release_charge)
+                    .unwrap_or(false);
+
+                if controls_enabled && players[active_index].is_charging() && release_charge {
                     let charge = players[active_index].charge_power();
                     if charge > 0.0 {
                         if players[active_index].skills().jetpack_enabled() {
@@ -359,6 +422,38 @@ pub async fn run_game() {
         }
         next_frame().await;
     }
+}
+
+fn collect_local_input(allow: bool) -> ControlState {
+    if !allow {
+        return ControlState::idle();
+    }
+    let mut move_axis: i8 = 0;
+    if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) {
+        move_axis -= 1;
+    }
+    if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) {
+        move_axis += 1;
+    }
+    move_axis = move_axis.clamp(-1, 1);
+
+    let mut state = ControlState {
+        move_axis,
+        aim_up: is_key_down(KeyCode::Up),
+        aim_down: is_key_down(KeyCode::Down),
+        start_charge: is_key_pressed(KeyCode::Space),
+        release_charge: is_key_released(KeyCode::Space),
+        skill_command: None,
+    };
+
+    if is_mouse_button_pressed(MouseButton::Left) {
+        let mouse = vec2(mouse_position().0, mouse_position().1);
+        if let Some(skill) = skill_button_hit(mouse) {
+            state.skill_command = Some(SkillCommand::Toggle(skill));
+        }
+    }
+
+    state
 }
 
 fn initialize_game(

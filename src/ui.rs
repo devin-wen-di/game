@@ -113,15 +113,14 @@ pub fn draw_skill_buttons(player: Option<&Player>) {
     }
 }
 
-pub fn handle_skill_button_click(mouse: Vec2, player: &mut Player) -> bool {
+pub fn skill_button_hit(mouse: Vec2) -> Option<SkillKind> {
     for (index, (skill, _)) in SKILL_BUTTONS.iter().enumerate() {
         let rect = skill_button_rect(index);
         if rect.contains(mouse) {
-            player.skills_mut().toggle(*skill);
-            return true;
+            return Some(*skill);
         }
     }
-    false
+    None
 }
 
 pub fn draw_turn_timer(time_remaining: f32, active_name: Option<&str>) {

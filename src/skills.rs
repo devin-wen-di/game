@@ -1,6 +1,7 @@
 use crate::config::{SCATTER_OFFSET_RAD, TRIPLE_DELAY};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Debug)]
 pub enum SkillKind {
     Jetpack,
     Heavy,
